@@ -1,0 +1,241 @@
+# app.py
+# Streamlit App: Linkage Analyst (Similar to Analyst Notebook)
+# Save this file as app.py and run with: streamlit run app.py
+# Author: Grok for user tomstewart545-dot
+
+import streamlit as st
+import networkx as nx
+import plotly.graph_objects as go
+import pandas as pd
+from io import StringIO
+
+st.set_page_config(page_title="Linkage Analyst", layout="wide")
+st.title("🔗 Linkage Analyst")
+st.markdown("""
+A simple Analyst Notebook-inspired tool for entity-relationship visualization.
+- Upload CSV files for **Nodes** and **Edges**.
+- Or use the **manual editors** to add data.
+- Visualize linkages with interactive force-directed graph.
+- Drag nodes, zoom, hover for details.
+""")
+
+# --- Sidebar for Instructions & Examples ---
+with st.sidebar:
+    st.header("📋 How to Use")
+    st.markdown("""
+1. **Prepare Data**:
+   - **Nodes CSV**: Columns `id` (unique), `label` (display name), optional `type` (e.g., Person, Org), `details`.
+   - **Edges CSV**: Columns `source` (node id), `target` (node id), optional `relation`, `weight`.
+
+2. **Upload or Edit**:
+   - Use file uploaders **or** editable dataframes.
+
+3. **Visualize**:
+   - Click **Refresh Graph** after changes.
+
+4. **Export**:
+   - Download current graph as PNG (via Plotly).
+""")
+
+    st.header("📄 Example CSVs")
+    example_nodes = """id,label,type,details
+1,Alice,Person,Analyst
+2,Bob,Person,Manager
+3,CompanyX,Org,Tech Firm
+4,ProjectY,Project,Secret"""
+    example_edges = """source,target,relation,weight
+1,2,Reports To,1
+1,3,Works At,1
+2,4,Leads,2
+3,4,Funds,3"""
+
+    st.download_button("Download Example Nodes CSV", example_nodes, "example_nodes.csv", "text/csv")
+    st.download_button("Download Example Edges CSV", example_edges, "example_edges.csv", "text/csv")
+
+# --- Tabs for Input Methods ---
+tab_upload, tab_manual = st.tabs(["📂 Upload CSVs", "✍️ Manual Edit"])
+
+# --- Upload Tab ---
+with tab_upload:
+    col1, col2 = st.columns(2)
+    with col1:
+        uploaded_nodes = st.file_uploader("Upload Nodes CSV", type=["csv"], key="nodes_upload")
+    with col2:
+        uploaded_edges = st.file_uploader("Upload Edges CSV", type=["csv"], key="edges_upload")
+
+# --- Manual Edit Tab ---
+with tab_manual:
+    st.markdown("### Nodes (add/edit rows below)")
+    default_nodes_df = pd.DataFrame([
+        {"id": "1", "label": "Alice", "type": "Person", "details": "Analyst"},
+        {"id": "2", "label": "Bob", "type": "Person", "details": "Manager"},
+    ])
+    nodes_df = st.data_editor(
+        default_nodes_df if (tab_upload and not uploaded_nodes) else pd.DataFrame(columns=["id", "label", "type", "details"]),
+        num_rows="dynamic",
+        use_container_width=True,
+        key="nodes_editor"
+    )
+
+    st.markdown("### Edges (add/edit rows below)")
+    default_edges_df = pd.DataFrame([
+        {"source": "1", "target": "2", "relation": "Reports To", "weight": 1},
+    ])
+    edges_df = st.data_editor(
+        default_edges_df if (tab_upload and not uploaded_edges) else pd.DataFrame(columns=["source", "target", "relation", "weight"]),
+        num_rows="dynamic",
+        use_container_width=True,
+        key="edges_editor"
+    )
+
+# --- Load Data Logic ---
+def load_csv(uploaded_file):
+    if uploaded_file is not None:
+        return pd.read_csv(uploaded_file)
+    return None
+
+nodes_csv = load_csv(uploaded_nodes)
+edges_csv = load_csv(uploaded_edges)
+
+# Prioritize manual editor if used, otherwise uploaded CSVs
+if 'nodes_editor' in st.session_state and not nodes_df.empty:
+    nodes = nodes_df
+elif nodes_csv is not None:
+    nodes = nodes_csv
+else:
+    nodes = pd.DataFrame()
+
+if 'edges_editor' in st.session_state and not edges_df.empty:
+    edges = edges_df
+elif edges_csv is not None:
+    edges = edges_csv
+else:
+    edges = pd.DataFrame()
+
+# --- Validation ---
+valid = True
+if nodes.empty:
+    st.warning("⚠️ No nodes defined. Add via upload or manual editor.")
+    valid = False
+if edges.empty:
+    st.info("ℹ️ No edges defined. Graph will show isolated nodes.")
+else:
+    # Check edge references
+    node_ids = set(nodes["id"].astype(str))
+    invalid_sources = edges[~edges["source"].astype(str).isin(node_ids)]["source"]
+    invalid_targets = edges[~edges["target"].astype(str).isin(node_ids)]["target"]
+    if not invalid_sources.empty or not invalid_targets.empty:
+        st.error(f"Invalid links: sources {list(invalid_sources.unique())}, targets {list(invalid_targets.unique())} not in nodes.")
+        valid = False
+
+# --- Build Graph ---
+if valid and st.button("🔄 Refresh Graph", type="primary"):
+    G = nx.Graph()
+
+    # Add nodes
+    for _, row in nodes.iterrows():
+        node_id = str(row["id"])
+        label = row.get("label", node_id)
+        node_type = row.get("type", "Unknown")
+        details = row.get("details", "")
+        G.add_node(node_id, label=label, type=node_type, details=details)
+
+    # Add edges
+    for _, row in edges.iterrows():
+        src = str(row["source"])
+        tgt = str(row["target"])
+        relation = row.get("relation", "Linked")
+        weight = float(row.get("weight", 1))
+        G.add_edge(src, tgt, relation=relation, weight=weight)
+
+    # --- Compute Layout (Force-Directed) ---
+    pos = nx.spring_layout(G, k=2, iterations=50, seed=42)
+
+    # --- Prepare Plotly Traces ---
+    edge_x = []
+    edge_y = []
+    edge_text = []
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+        edge_text.append(f"{edge[2].get('relation', 'Link')}<br>Weight: {edge[2].get('weight', 1)}")
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1, color="#888"),
+        hoverinfo="text",
+        text=edge_text,
+        mode="lines"
+    )
+
+    node_x = []
+    node_y = []
+    node_text = []
+    node_color = []
+    node_size = []
+    color_map = {"Person": "lightblue", "Org": "lightgreen", "Project": "orange", "Unknown": "gray"}
+    
+    for node in G.nodes(data=True):
+        x, y = pos[node[0]]
+        node_x.append(x)
+        node_y.append(y)
+        lbl = node[1].get("label", node[0])
+        typ = node[1].get("type", "Unknown")
+        det = node[1].get("details", "")
+        node_text.append(f"<b>{lbl}</b><br>Type: {typ}<br>{det}")
+        node_color.append(color_map.get(typ, "gray"))
+        node_size.append(20)
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers+text",
+        hoverinfo="text",
+        text=[G.nodes[n].get("label", n) for n in G.nodes()],
+        textposition="top center",
+        marker=dict(
+            showscale=False,
+            color=node_color,
+            size=node_size,
+            line_width=2
+        ),
+        hovertext=node_text
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+                    layout=go.Layout(
+                        showlegend=False,
+                        hovermode="closest",
+                        margin=dict(b=20, l=5, r=5, t=40),
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        paper_bgcolor="white",
+                        plot_bgcolor="white",
+                        height=700
+                    ))
+    
+    fig.update_layout(dragmode="lasso")
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Download Graph ---
+    st.download_button(
+        "📥 Download Graph as PNG",
+        data=fig.to_image(format="png"),
+        file_name="linkage_graph.png",
+        mime="image/png"
+    )
+
+    # --- Summary ---
+    with st.expander("📊 Graph Summary"):
+        st.write(f"**Nodes**: {G.number_of_nodes()} | **Edges**: {G.number_of_edges()}")
+        if G.number_of_nodes() > 0:
+            degrees = dict(G.degree())
+            central = max(degrees, key=degrees.get)
+            st.write(f"**Most Connected**: {G.nodes[central].get('label', central)} (degree {degrees[central]})")
+
+else:
+    if not valid:
+        st.stop()
+    st.info("Define nodes and edges, then click **Refresh Graph**.")
